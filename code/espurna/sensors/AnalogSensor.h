@@ -1,9 +1,9 @@
 // -----------------------------------------------------------------------------
 // Analog Sensor (maps to an analogRead)
-// Copyright (C) 2017-2018 by Xose Pérez <xose dot perez at gmail dot com>
+// Copyright (C) 2017-2019 by Xose Pérez <xose dot perez at gmail dot com>
 // -----------------------------------------------------------------------------
 
-#if SENSOR_SUPPORT && (ANALOG_SUPPORT || NTC_SUPPORT)
+#if SENSOR_SUPPORT && (ANALOG_SUPPORT || NTC_SUPPORT || LDR_SUPPORT)
 
 #pragma once
 

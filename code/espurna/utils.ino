@@ -2,14 +2,11 @@
 
 UTILS MODULE
 
-Copyright (C) 2017-2018 by Xose Pérez <xose dot perez at gmail dot com>
+Copyright (C) 2017-2019 by Xose Pérez <xose dot perez at gmail dot com>
 
 */
 
 #include <Ticker.h>
-Ticker _defer_reset;
-
-uint8_t _reset_reason = 0;
 
 String getIdentifier() {
     char buffer[20];
@@ -101,34 +98,18 @@ String getEspurnaWebUI() {
 }
 
 String buildTime() {
-
-    const char time_now[] = __TIME__;   // hh:mm:ss
-    unsigned int hour = atoi(&time_now[0]);
-    unsigned int minute = atoi(&time_now[3]);
-    unsigned int second = atoi(&time_now[6]);
-
-    const char date_now[] = __DATE__;   // Mmm dd yyyy
-    const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    unsigned int month = 0;
-    for ( int i = 0; i < 12; i++ ) {
-        if (strncmp(date_now, months[i], 3) == 0 ) {
-            month = i + 1;
-            break;
-        }
-    }
-    unsigned int day = atoi(&date_now[3]);
-    unsigned int year = atoi(&date_now[7]);
-
-    char buffer[20];
-    snprintf_P(
-        buffer, sizeof(buffer), PSTR("%04d-%02d-%02d %02d:%02d:%02d"),
-        year, month, day, hour, minute, second
-    );
-
-    return String(buffer);
-
+    #if NTP_SUPPORT
+        return ntpDateTime(__UNIX_TIMESTAMP__);
+    #else
+        char buffer[20];
+        snprintf_P(
+            buffer, sizeof(buffer), PSTR("%04d-%02d-%02d %02d:%02d:%02d"),
+            __TIME_YEAR__, __TIME_MONTH__, __TIME_DAY__,
+            __TIME_HOUR__, __TIME_MINUTE__, __TIME_SECOND__
+        );
+        return String(buffer);
+    #endif
 }
-
 
 unsigned long getUptime() {
 
@@ -165,7 +146,9 @@ namespace Heartbeat {
         Board = 1 << 15,
         Loadavg = 1 << 16,
         Interval = 1 << 17,
-        Description = 1 << 18
+        Description = 1 << 18,
+        Range = 1 << 19,
+        Remote_temp = 1 << 20
     };
 
     constexpr uint32_t defaultValue() {
@@ -186,7 +169,9 @@ namespace Heartbeat {
             (Version * (HEARTBEAT_REPORT_VERSION)) | \
             (Board * (HEARTBEAT_REPORT_BOARD)) | \
             (Loadavg * (HEARTBEAT_REPORT_LOADAVG)) | \
-            (Interval * (HEARTBEAT_REPORT_INTERVAL));
+            (Interval * (HEARTBEAT_REPORT_INTERVAL)) | \
+            (Range * (HEARTBEAT_REPORT_RANGE)) | \
+            (Remote_temp * (HEARTBEAT_REPORT_REMOTE_TEMP));
     }
 
     uint32_t currentValue() {
@@ -202,6 +187,9 @@ void heartbeat() {
 
     unsigned long uptime_seconds = getUptime();
     unsigned int free_heap = getFreeHeap();
+    
+    UNUSED(uptime_seconds);
+    UNUSED(free_heap);
 
     #if MQTT_SUPPORT
         unsigned char _heartbeat_mode = getHeartbeatMode();
@@ -295,6 +283,19 @@ void heartbeat() {
             if (hb_cfg & Heartbeat::Loadavg)
                 mqttSend(MQTT_TOPIC_LOADAVG, String(systemLoadAverage()).c_str());
 
+            #if THERMOSTAT_SUPPORT
+                if (hb_cfg & Heartbeat::Range) {
+                    mqttSend(MQTT_TOPIC_HOLD_TEMP "_" MQTT_TOPIC_HOLD_TEMP_MIN, String(_temp_range.min).c_str());
+                    mqttSend(MQTT_TOPIC_HOLD_TEMP "_" MQTT_TOPIC_HOLD_TEMP_MAX, String(_temp_range.max).c_str());
+                }
+
+                if (hb_cfg & Heartbeat::Remote_temp) {
+                    char remote_temp[6];
+                    dtostrf(_remote_temp.temp, 1-sizeof(remote_temp), 1, remote_temp);
+                    mqttSend(MQTT_TOPIC_REMOTE_TEMP, String(remote_temp).c_str());
+                }
+            #endif
+
         } else if (!serial && _heartbeat_mode == HEARTBEAT_REPEAT_STATUS) {
             mqttSend(MQTT_TOPIC_STATUS, MQTT_STATUS_ONLINE, true);
         }
@@ -314,6 +315,15 @@ void heartbeat() {
 
         if (hb_cfg & Heartbeat::Rssi)
             idbSend(MQTT_TOPIC_RSSI, String(WiFi.RSSI()).c_str());
+
+        if ((hb_cfg & Heartbeat::Vcc) && (ADC_MODE_VALUE == ADC_VCC))
+            idbSend(MQTT_TOPIC_VCC, String(ESP.getVcc()).c_str());
+                    
+        if (hb_cfg & Heartbeat::Loadavg)
+            idbSend(MQTT_TOPIC_LOADAVG, String(systemLoadAverage()).c_str());
+
+        if (hb_cfg & Heartbeat::Ssid)
+            idbSend(MQTT_TOPIC_SSID, WiFi.SSID().c_str());
     #endif
 
 }
@@ -368,6 +378,16 @@ void infoMemory(const char * name, unsigned int total_memory, unsigned int free_
 
 }
 
+const char* _info_wifi_sleep_mode(WiFiSleepType_t type) {
+    switch (type) {
+        case WIFI_NONE_SLEEP: return "NONE";
+        case WIFI_LIGHT_SLEEP: return "LIGHT";
+        case WIFI_MODEM_SLEEP: return "MODEM";
+        default: return "UNKNOWN";
+    }
+}
+
+
 void info() {
 
     DEBUG_MSG_P(PSTR("\n\n---8<-------\n\n"));
@@ -386,11 +406,13 @@ void info() {
     DEBUG_MSG_P(PSTR("[MAIN] SDK version: %s\n"), ESP.getSdkVersion());
     DEBUG_MSG_P(PSTR("[MAIN] Core version: %s\n"), getCoreVersion().c_str());
     DEBUG_MSG_P(PSTR("[MAIN] Core revision: %s\n"), getCoreRevision().c_str());
+    DEBUG_MSG_P(PSTR("[MAIN] Build time: %lu\n"), __UNIX_TIMESTAMP__);
     DEBUG_MSG_P(PSTR("\n"));
 
     // -------------------------------------------------------------------------
 
     FlashMode_t mode = ESP.getFlashChipMode();
+    UNUSED(mode);
     DEBUG_MSG_P(PSTR("[MAIN] Flash chip ID: 0x%06X\n"), ESP.getFlashChipId());
     DEBUG_MSG_P(PSTR("[MAIN] Flash speed: %u Hz\n"), ESP.getFlashChipSpeed());
     DEBUG_MSG_P(PSTR("[MAIN] Flash mode: %s\n"), mode == FM_QIO ? "QIO" : mode == FM_QOUT ? "QOUT" : mode == FM_DIO ? "DIO" : mode == FM_DOUT ? "DOUT" : "UNKNOWN");
@@ -442,7 +464,7 @@ void info() {
 
     DEBUG_MSG_P(PSTR("[MAIN] Boot version: %d\n"), ESP.getBootVersion());
     DEBUG_MSG_P(PSTR("[MAIN] Boot mode: %d\n"), ESP.getBootMode());
-    unsigned char reason = resetReason();
+    unsigned char reason = customResetReason();
     if (reason > 0) {
         char buffer[32];
         strcpy_P(buffer, custom_reset_string[reason-1]);
@@ -469,9 +491,14 @@ void info() {
     #if ADC_MODE_VALUE == ADC_VCC
         DEBUG_MSG_P(PSTR("[MAIN] Power: %u mV\n"), ESP.getVcc());
     #endif
-    #if WIFI_SLEEP_MODE != WIFI_NONE_SLEEP
-        DEBUG_MSG_P(PSTR("[MAIN] Power saving delay value: %lu ms\n"), systemLoopDelay());
-    #endif
+    if (espurnaLoopDelay()) {
+        DEBUG_MSG_P(PSTR("[MAIN] Power saving delay value: %lu ms\n"), espurnaLoopDelay());
+    }
+
+    const WiFiSleepType_t sleep_mode = WiFi.getSleepMode();
+    if (sleep_mode != WIFI_NONE_SLEEP) {
+        DEBUG_MSG_P(PSTR("[MAIN] WiFi Sleep Mode: %s\n"), _info_wifi_sleep_mode(sleep_mode));
+    }
 
     // -------------------------------------------------------------------------
 
@@ -535,34 +562,27 @@ bool sslFingerPrintChar(const char * fingerprint, char * destination) {
 // Reset
 // -----------------------------------------------------------------------------
 
-unsigned char resetReason() {
-    static unsigned char status = 255;
-    if (status == 255) {
-        status = EEPROMr.read(EEPROM_CUSTOM_RESET);
-        if (status > 0) resetReason(0);
-        if (status > CUSTOM_RESET_MAX) status = 0;
-    }
-    return status;
+// Use fixed method for Core 2.3.0, because it erases only 2 out of 4 SDK-reserved sectors
+// Fixed since 2.4.0, see: esp8266/core/esp8266/Esp.cpp: ESP::eraseConfig()
+bool eraseSDKConfig() {
+    #if defined(ARDUINO_ESP8266_RELEASE_2_3_0)
+        const size_t cfgsize = 0x4000;
+        size_t cfgaddr = ESP.getFlashChipSize() - cfgsize;
+
+        for (size_t offset = 0; offset < cfgsize; offset += SPI_FLASH_SEC_SIZE) {
+            if (!ESP.flashEraseSector((cfgaddr + offset) / SPI_FLASH_SEC_SIZE)) {
+                return false;
+            }
+        }
+
+        return true;
+    #else
+        return ESP.eraseConfig();
+    #endif
 }
 
-void resetReason(unsigned char reason) {
-    _reset_reason = reason;
-    EEPROMr.write(EEPROM_CUSTOM_RESET, reason);
-    eepromCommit();
-}
-
-void reset() {
-    ESP.restart();
-}
-
-void deferredReset(unsigned long delay, unsigned char reason) {
-    _defer_reset.once_ms(delay, resetReason, reason);
-}
-
-bool checkNeedsReset() {
-    return _reset_reason > 0;
-}
-
+// -----------------------------------------------------------------------------
+// Helper functions
 // -----------------------------------------------------------------------------
 
 char * ltrim(char * s) {

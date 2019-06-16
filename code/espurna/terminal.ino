@@ -71,6 +71,7 @@ void _terminalKeysCommand() {
     }
 
     unsigned long freeEEPROM = SPI_FLASH_SEC_SIZE - settingsSize();
+    UNUSED(freeEEPROM);
     DEBUG_MSG_P(PSTR("Number of keys: %d\n"), keys.size());
     DEBUG_MSG_P(PSTR("Current EEPROM sector: %u\n"), EEPROMr.current());
     DEBUG_MSG_P(PSTR("Free EEPROM: %d bytes (%d%%)\n"), freeEEPROM, 100 * freeEEPROM / SPI_FLASH_SEC_SIZE);
@@ -94,9 +95,8 @@ void _terminalInitCommand() {
 
     terminalRegisterCommand(F("ERASE.CONFIG"), [](Embedis* e) {
         terminalOK();
-        resetReason(CUSTOM_RESET_TERMINAL);
-        _eepromCommit();
-        ESP.eraseConfig();
+        customResetReason(CUSTOM_RESET_TERMINAL);
+        eraseSDKConfig();
         *((int*) 0) = 0; // see https://github.com/esp8266/Arduino/issues/1494
     });
 
@@ -179,7 +179,7 @@ void _terminalInitCommand() {
     });
 
     terminalRegisterCommand(F("RESET.SAFE"), [](Embedis* e) {
-        EEPROMr.write(EEPROM_CRASH_COUNTER, SYSTEM_CHECK_MAX);
+        systemStabilityCounter(SYSTEM_CHECK_MAX);
         terminalOK();
         deferredReset(100, CUSTOM_RESET_TERMINAL);
     });
@@ -221,7 +221,7 @@ void _terminalLoop() {
     #if SERIAL_RX_ENABLED
 
         while (SERIAL_RX_PORT.available() > 0) {
-            char rc = Serial.read();
+            char rc = SERIAL_RX_PORT.read();
             _serial_rx_buffer[_serial_rx_pointer++] = rc;
             if ((_serial_rx_pointer == TERMINAL_BUFFER_SIZE) || (rc == 10)) {
                 terminalInject(_serial_rx_buffer, (size_t) _serial_rx_pointer);
